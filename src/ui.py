@@ -85,7 +85,7 @@ def _index_symbol_autodetect_ui(config) -> str:
     # 2) config default
     base = st.session_state.get("validated_index_symbol", "") or config.index_symbol
 
-    idx_sym = st.text_input("BANKNIFTY index symbol", value=base)
+    idx_sym = st.text_input("BANKNIFTY index symbol", value=base, key="banknifty_index_symbol")
 
     if not st.session_state.get("fyers_access_token"):
         st.info("Login in the sidebar to auto-detect/validate index symbol.")
