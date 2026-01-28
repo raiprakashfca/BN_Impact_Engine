@@ -1,17 +1,8 @@
-# --- Core UI ---
 streamlit>=1.32,<1.37
-
-# --- Data stack (keep flexible to avoid wheel/build issues) ---
 numpy>=1.26,<3
 pandas>=2.1,<2.3
-
-# --- Networking (MUST match fyers-apiv3 constraint) ---
 requests==2.31.0
-
-# --- Fyers API ---
 fyers-apiv3==3.1.8
-
-# --- Utilities (safe + commonly needed) ---
 python-dateutil>=2.8,<3
 pytz>=2023.3
 packaging>=23,<25
