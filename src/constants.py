@@ -1,42 +1,71 @@
 from __future__ import annotations
-import json
 from dataclasses import dataclass
-from pathlib import Path
+from typing import Tuple
+import io
+
+import pandas as pd
+import requests
 import streamlit as st
 
-@dataclass(frozen=True)
-class AppConfig:
-    client_id: str
-    secret_key: str
-    redirect_uri: str
-    app_id: str
-    index_symbol: str
-    constituents: list[str]
-    cache_dir: Path
+@dataclass
+class ConstituentsResult:
+    fyers_symbols: list[str]
+    nse_symbols: list[str]
+    source: str
+    note: str
 
-def _get_secret(key: str, default: str = "") -> str:
-    return str(st.secrets.get(key, default) or default)
+CSV_SOURCES = [
+    "https://www.niftyindices.com/IndexConstituent/ind_niftybanklist.csv",
+    "https://www1.nseindia.com/content/indices/ind_niftybanklist.csv",
+]
 
-def load_config() -> AppConfig:
-    client_id = _get_secret("FYERS_CLIENT_ID")
-    secret_key = _get_secret("FYERS_SECRET_KEY")
-    redirect_uri = _get_secret("FYERS_REDIRECT_URI")
-    app_id = _get_secret("FYERS_APP_ID", client_id)
-    index_symbol = _get_secret("FYERS_INDEX_SYMBOL", "NSE:NIFTYBANK-INDEX")
-    cons_raw = _get_secret("FYERS_CONSTITUENTS", "[]")
-    try:
-        constituents = json.loads(cons_raw) if isinstance(cons_raw, str) else list(cons_raw)
-    except Exception:
-        constituents = []
-    cache_dir = Path(_get_secret("CACHE_DIR", "data_cache"))
-    cache_dir.mkdir(parents=True, exist_ok=True)
+DEFAULT_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,text/csv;q=0.8,*/*;q=0.7",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Connection": "keep-alive",
+}
 
-    return AppConfig(
-        client_id=client_id.strip(),
-        secret_key=secret_key.strip(),
-        redirect_uri=redirect_uri.strip(),
-        app_id=app_id.strip(),
-        index_symbol=index_symbol.strip(),
-        constituents=[str(c).strip() for c in constituents if str(c).strip()],
-        cache_dir=cache_dir,
+def _to_fyers_symbol(nse_symbol: str) -> str:
+    return f"NSE:{nse_symbol.strip().upper()}-EQ"
+
+def _parse_constituent_csv(text: str) -> Tuple[list[str], str]:
+    df = pd.read_csv(io.StringIO(text))
+    cols = [c.strip().lower() for c in df.columns]
+    sym_col = None
+    for cand in ["symbol", "sym", "ticker"]:
+        if cand in cols:
+            sym_col = df.columns[cols.index(cand)]
+            break
+    if sym_col is None:
+        sym_col = df.columns[0]
+
+    nse = (
+        df[sym_col]
+        .astype(str)
+        .str.strip()
+        .str.upper()
+        .replace({"NAN": ""})
     )
+    nse = [s for s in nse.tolist() if s and s != ""]
+    return nse, f"Parsed {len(nse)} rows from CSV."
+
+@st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
+def fetch_banknifty_constituents() -> ConstituentsResult:
+    last_err = ""
+    for url in CSV_SOURCES:
+        try:
+            resp = requests.get(url, headers=DEFAULT_HEADERS, timeout=20)
+            if resp.status_code != 200 or not resp.text:
+                last_err = f"{url} returned {resp.status_code}"
+                continue
+            nse_syms, note = _parse_constituent_csv(resp.text)
+            if not nse_syms:
+                last_err = f"{url} parsed zero symbols"
+                continue
+            fyers_syms = [_to_fyers_symbol(s) for s in nse_syms]
+            return ConstituentsResult(fyers_syms, nse_syms, url, note)
+        except Exception as e:
+            last_err = f"{url} failed: {e}"
+
+    return ConstituentsResult([], [], "", f"Failed to fetch constituents. Last error: {last_err}")
