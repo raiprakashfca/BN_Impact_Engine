@@ -1,3 +1,4 @@
+# filename: src/ui.py
 from __future__ import annotations
 from datetime import date, datetime, timedelta
 import json
@@ -9,9 +10,15 @@ from .fyers_history import IST, get_fyers_client
 from .expiry_detect import detect_weekly_expiries_from_data
 from .constituents import fetch_banknifty_constituents
 
+# NEW
+from .symbol_discovery import find_banknifty_index_candidates, validate_symbol_history
+
+
 def sidebar_auth(default_client_id: str, default_secret: str, default_redirect: str):
     st.sidebar.header("FYERS Login")
-    client_id = st.sidebar.text_input("Client ID", value=default_client_id)
+
+    # UI label still says Client ID, but for FYERS this is your APP ID.
+    client_id = st.sidebar.text_input("FYERS App ID", value=default_client_id)
     secret_key = st.sidebar.text_input("Secret Key", value=default_secret, type="password")
     redirect_uri = st.sidebar.text_input("Redirect URI", value=default_redirect)
 
@@ -22,7 +29,7 @@ def sidebar_auth(default_client_id: str, default_secret: str, default_redirect: 
     auth_code = st.sidebar.text_input("Paste auth_code here", value="")
     if st.sidebar.button("Generate Access Token"):
         if not (client_id and secret_key and redirect_uri and auth_code):
-            st.sidebar.error("Missing client_id/secret/redirect/auth_code.")
+            st.sidebar.error("Missing app_id/secret/redirect/auth_code.")
         else:
             try:
                 token = exchange_auth_code_for_token(client_id, secret_key, redirect_uri, auth_code.strip())
@@ -31,11 +38,16 @@ def sidebar_auth(default_client_id: str, default_secret: str, default_redirect: 
             except Exception as e:
                 st.sidebar.error(str(e))
 
-    token = st.sidebar.text_input("Access Token (session)", value=st.session_state.get("fyers_access_token",""), type="password")
+    token = st.sidebar.text_input(
+        "Access Token (session)",
+        value=st.session_state.get("fyers_access_token", ""),
+        type="password",
+    )
     if token:
         st.session_state["fyers_access_token"] = token
 
-    return client_id, secret_key, redirect_uri, st.session_state.get("fyers_access_token","")
+    return client_id, secret_key, redirect_uri, st.session_state.get("fyers_access_token", "")
+
 
 def _get_constituents_ui() -> list[str]:
     auto = fetch_banknifty_constituents()
@@ -60,10 +72,80 @@ def _get_constituents_ui() -> list[str]:
             return []
     return auto.fyers_symbols
 
+
+def _index_symbol_autodetect_ui(config) -> str:
+    """
+    Auto-detect + validate FYERS index symbol from FYERS Symbol Master.
+    Returns the symbol to use (either user-edited or auto-selected).
+    """
+    st.markdown("### Index symbol (auto-detect) 🔎")
+
+    # Base value for the text input:
+    # 1) validated symbol in session_state
+    # 2) config default
+    base = st.session_state.get("validated_index_symbol", "") or config.index_symbol
+
+    idx_sym = st.text_input("BANKNIFTY index symbol", value=base)
+
+    if not st.session_state.get("fyers_access_token"):
+        st.info("Login in the sidebar to auto-detect/validate index symbol.")
+        return idx_sym
+
+    colA, colB = st.columns([1, 2])
+
+    with colA:
+        if st.button("Auto-detect candidates"):
+            try:
+                cands = find_banknifty_index_candidates()
+                st.session_state["index_candidates"] = [(c.symbol, c.label) for c in cands]
+                if not cands:
+                    st.warning("No candidates found in FYERS symbol master.")
+            except Exception as e:
+                st.error(str(e))
+
+    with colB:
+        cands = st.session_state.get("index_candidates", [])
+        if cands:
+            symbols = [x[0] for x in cands]
+            labels = [x[1] for x in cands]
+
+            # map selection by index
+            choice = st.selectbox(
+                "Detected candidates (from FYERS Symbol Master)",
+                options=list(range(len(symbols))),
+                format_func=lambda i: labels[i],
+            )
+
+            chosen = symbols[choice]
+
+            v1, v2 = st.columns([1, 2])
+            with v1:
+                if st.button("Validate selected"):
+                    ok, msg = validate_symbol_history(
+                        client_id=config.client_id,
+                        access_token=st.session_state["fyers_access_token"],
+                        symbol=chosen,
+                        cache_dir=config.cache_dir,
+                        probe_day=datetime.now(IST).date(),
+                    )
+                    if ok:
+                        st.session_state["validated_index_symbol"] = chosen
+                        st.success(msg)
+                        st.info(f"Saved for this session: {chosen}")
+                    else:
+                        st.error(msg)
+
+            with v2:
+                st.caption("Tip: Validation checks a tiny history slice. If valid, we store it for this session.")
+
+    return st.session_state.get("validated_index_symbol", "") or idx_sym
+
+
 def tab_live(config):
     st.subheader("Expiry Live Impact (15:00–15:30 IST) 📌")
 
-    idx_sym = st.text_input("BANKNIFTY index symbol", value=config.index_symbol)
+    idx_sym = _index_symbol_autodetect_ui(config)
+
     constituents = _get_constituents_ui()
     if not constituents:
         st.stop()
@@ -77,7 +159,7 @@ def tab_live(config):
         st.warning("Login in the sidebar first.")
         return
 
-    col1, col2 = st.columns([1,1])
+    col1, col2 = st.columns([1, 1])
 
     with col1:
         if st.button("Run live snapshot"):
@@ -115,6 +197,7 @@ def tab_live(config):
             except Exception as e:
                 st.error(str(e))
 
+
 def tab_backtest(config):
     st.subheader("Expiry Backtest (max history within FYERS limits) 🧪")
 
@@ -122,7 +205,8 @@ def tab_backtest(config):
         st.warning("Login in the sidebar first.")
         return
 
-    idx_sym = st.text_input("BANKNIFTY index symbol", value=config.index_symbol, key="bt_idx")
+    idx_sym = _index_symbol_autodetect_ui(config)
+
     constituents = _get_constituents_ui()
     if not constituents:
         st.stop()
@@ -163,7 +247,7 @@ def tab_backtest(config):
                 if not res.expiry_betas_long.empty:
                     summary = (
                         res.expiry_betas_long.groupby("symbol")["beta_bn_points_per_rs1"]
-                        .agg(["median","mean","std","count"])
+                        .agg(["median", "mean", "std", "count"])
                         .sort_values("median", ascending=False)
                         .reset_index()
                     )
