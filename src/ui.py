@@ -7,6 +7,7 @@ from .fyers_auth import build_auth_code_url, exchange_auth_code_for_token
 from .engines import run_backtest, run_live_snapshot, get_history_cached
 from .fyers_history import IST, get_fyers_client
 from .expiry_detect import detect_weekly_expiries_from_data
+from .constituents import fetch_banknifty_constituents
 
 def sidebar_auth(default_client_id: str, default_secret: str, default_redirect: str):
     st.sidebar.header("FYERS Login")
@@ -36,18 +37,36 @@ def sidebar_auth(default_client_id: str, default_secret: str, default_redirect: 
 
     return client_id, secret_key, redirect_uri, st.session_state.get("fyers_access_token","")
 
+def _get_constituents_ui() -> list[str]:
+    auto = fetch_banknifty_constituents()
+    if auto.fyers_symbols:
+        st.caption(f"Auto-loaded {len(auto.fyers_symbols)} constituents from: {auto.source}")
+        with st.expander("See auto constituents"):
+            st.code("\n".join(auto.fyers_symbols))
+    else:
+        st.warning(auto.note)
+
+    allow_override = st.toggle("Override constituents manually (not recommended)", value=False)
+    if allow_override:
+        default = json.dumps(auto.fyers_symbols or [], indent=2)
+        cons_text = st.text_area("Constituents override (JSON list of FYERS symbols)", value=default, height=220)
+        try:
+            constituents = json.loads(cons_text)
+            if not isinstance(constituents, list) or not constituents:
+                raise ValueError("Must be a non-empty JSON list.")
+            return [str(x).strip() for x in constituents if str(x).strip()]
+        except Exception as e:
+            st.error(f"Bad override JSON: {e}")
+            return []
+    return auto.fyers_symbols
+
 def tab_live(config):
     st.subheader("Expiry Live Impact (15:00–15:30 IST) 📌")
 
     idx_sym = st.text_input("BANKNIFTY index symbol", value=config.index_symbol)
-    cons = st.text_area("Constituents (JSON list of FYERS symbols)", value=json.dumps(config.constituents, indent=2))
-    try:
-        constituents = json.loads(cons)
-        if not isinstance(constituents, list) or not constituents:
-            raise ValueError("Constituents must be a non-empty JSON list.")
-    except Exception as e:
-        st.error(f"Bad constituents JSON: {e}")
-        return
+    constituents = _get_constituents_ui()
+    if not constituents:
+        st.stop()
 
     alpha = st.number_input("Ridge alpha (stability)", min_value=0.0, value=1.0, step=0.5)
 
@@ -104,14 +123,9 @@ def tab_backtest(config):
         return
 
     idx_sym = st.text_input("BANKNIFTY index symbol", value=config.index_symbol, key="bt_idx")
-    cons = st.text_area("Constituents (JSON list of FYERS symbols)", value=json.dumps(config.constituents, indent=2), key="bt_cons")
-    try:
-        constituents = json.loads(cons)
-        if not isinstance(constituents, list) or not constituents:
-            raise ValueError("Constituents must be a non-empty JSON list.")
-    except Exception as e:
-        st.error(f"Bad constituents JSON: {e}")
-        return
+    constituents = _get_constituents_ui()
+    if not constituents:
+        st.stop()
 
     alpha = st.number_input("Ridge alpha (stability)", min_value=0.0, value=1.0, step=0.5, key="bt_alpha")
 
