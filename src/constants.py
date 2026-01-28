@@ -21,8 +21,8 @@ def _get_secret(key: str, default: str = "") -> str:
 
 def load_config() -> AppConfig:
     """
-    Centralised config loader.
-    FYERS uses APP ID (not client id), but SDK naming is inconsistent.
+    Central config loader.
+    FYERS uses APP ID (not client id).
     """
     app_id = _get_secret("FYERS_APP_ID")
     secret_key = _get_secret("FYERS_SECRET_KEY")
@@ -33,7 +33,7 @@ def load_config() -> AppConfig:
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     return AppConfig(
-        client_id=app_id,     # FYERS_APP_ID used everywhere
+        client_id=app_id,   # FYERS_APP_ID reused everywhere
         secret_key=secret_key,
         redirect_uri=redirect_uri,
         app_id=app_id,
