@@ -1,5 +1,6 @@
 # filename: src/ui.py
 from __future__ import annotations
+
 from datetime import date, datetime, timedelta
 import json
 import streamlit as st
@@ -10,14 +11,16 @@ from .fyers_history import IST, get_fyers_client
 from .expiry_detect import detect_weekly_expiries_from_data
 from .constituents import fetch_banknifty_constituents
 
-# NEW
+# Auto-detect + validate index symbol
 from .symbol_discovery import find_banknifty_index_candidates, validate_symbol_history
 
 
+# -------------------------------------------------------------------
+# Sidebar auth (kept for compatibility; your app.py may handle auth now)
+# -------------------------------------------------------------------
 def sidebar_auth(default_client_id: str, default_secret: str, default_redirect: str):
     st.sidebar.header("FYERS Login")
 
-    # UI label still says Client ID, but for FYERS this is your APP ID.
     client_id = st.sidebar.text_input("FYERS App ID", value=default_client_id)
     secret_key = st.sidebar.text_input("Secret Key", value=default_secret, type="password")
     redirect_uri = st.sidebar.text_input("Redirect URI", value=default_redirect)
@@ -49,8 +52,12 @@ def sidebar_auth(default_client_id: str, default_secret: str, default_redirect: 
     return client_id, secret_key, redirect_uri, st.session_state.get("fyers_access_token", "")
 
 
+# -------------------------
+# Constituents UI (auto-load)
+# -------------------------
 def _get_constituents_ui() -> list[str]:
     auto = fetch_banknifty_constituents()
+
     if auto.fyers_symbols:
         st.caption(f"Auto-loaded {len(auto.fyers_symbols)} constituents from: {auto.source}")
         with st.expander("See auto constituents"):
@@ -70,31 +77,56 @@ def _get_constituents_ui() -> list[str]:
         except Exception as e:
             st.error(f"Bad override JSON: {e}")
             return []
+
     return auto.fyers_symbols
 
 
-def _index_symbol_autodetect_ui(config) -> str:
+# ---------------------------------------------------------
+# Index Symbol Control (Render ONCE per run; reuse everywhere)
+# ---------------------------------------------------------
+def _ensure_index_symbol_defaults(config) -> None:
+    # Default symbol
+    if "banknifty_index_symbol" not in st.session_state:
+        st.session_state["banknifty_index_symbol"] = (
+            st.session_state.get("validated_index_symbol") or config.index_symbol
+        )
+
+    # Candidate list cache
+    if "index_candidates" not in st.session_state:
+        st.session_state["index_candidates"] = []
+
+
+def _render_index_symbol_controls_once(config) -> str:
     """
-    Auto-detect + validate FYERS index symbol from FYERS Symbol Master.
-    Returns the symbol to use (either user-edited or auto-selected).
+    This renders the index symbol UI exactly once per script run.
+    Subsequent calls in the same run just return the stored value.
+
+    This avoids DuplicateWidgetID with tabs.
     """
+    _ensure_index_symbol_defaults(config)
+
+    # If already rendered during this run, don't create widgets again.
+    if st.session_state.get("_index_symbol_controls_rendered_this_run"):
+        return st.session_state["banknifty_index_symbol"]
+
+    st.session_state["_index_symbol_controls_rendered_this_run"] = True
+
     st.markdown("### Index symbol (auto-detect) 🔎")
 
-    # Base value for the text input:
-    # 1) validated symbol in session_state
-    # 2) config default
-    base = st.session_state.get("validated_index_symbol", "") or config.index_symbol
-
-    idx_sym = st.text_input("BANKNIFTY index symbol", value=base, key="banknifty_index_symbol")
+    st.text_input(
+        "BANKNIFTY index symbol",
+        key="banknifty_index_symbol",
+        help="Used for history fetch + impact estimation. Auto-detect can validate the correct FYERS index symbol for your account.",
+    )
 
     if not st.session_state.get("fyers_access_token"):
         st.info("Login in the sidebar to auto-detect/validate index symbol.")
-        return idx_sym
+        return st.session_state["banknifty_index_symbol"]
 
     colA, colB = st.columns([1, 2])
 
     with colA:
-        if st.button("Auto-detect candidates"):
+        if st.button("Auto-detect candidates", key="btn_detect_index_candidates"):
             try:
                 cands = find_banknifty_index_candidates()
                 st.session_state["index_candidates"] = [(c.symbol, c.label) for c in cands]
@@ -109,18 +141,18 @@ def _index_symbol_autodetect_ui(config) -> str:
             symbols = [x[0] for x in cands]
             labels = [x[1] for x in cands]
 
-            # map selection by index
             choice = st.selectbox(
                 "Detected candidates (from FYERS Symbol Master)",
                 options=list(range(len(symbols))),
                 format_func=lambda i: labels[i],
+                key="sel_index_candidate",
             )
 
             chosen = symbols[choice]
 
             v1, v2 = st.columns([1, 2])
             with v1:
-                if st.button("Validate selected"):
+                if st.button("Validate selected", key="btn_validate_index_symbol"):
                     ok, msg = validate_symbol_history(
                         client_id=config.client_id,
                         access_token=st.session_state["fyers_access_token"],
@@ -130,21 +162,39 @@ def _index_symbol_autodetect_ui(config) -> str:
                     )
                     if ok:
                         st.session_state["validated_index_symbol"] = chosen
+                        st.session_state["banknifty_index_symbol"] = chosen
                         st.success(msg)
                         st.info(f"Saved for this session: {chosen}")
                     else:
                         st.error(msg)
 
             with v2:
-                st.caption("Tip: Validation checks a tiny history slice. If valid, we store it for this session.")
+                st.caption("Validation hits a tiny history call. If it returns without 'valid symbol' error, we accept it.")
 
-    return st.session_state.get("validated_index_symbol", "") or idx_sym
+    return st.session_state["banknifty_index_symbol"]
 
 
+def _get_index_symbol_value(config) -> str:
+    """
+    Read-only getter for other tabs.
+    Ensures defaults exist, but DOES NOT render widgets (prevents duplicates).
+    """
+    _ensure_index_symbol_defaults(config)
+    return st.session_state["banknifty_index_symbol"]
+
+
+# -------------------------
+# Tabs
+# -------------------------
 def tab_live(config):
     st.subheader("Expiry Live Impact (15:00–15:30 IST) 📌")
 
-    idx_sym = _index_symbol_autodetect_ui(config)
+    # Reset the per-run render-flag here.
+    # This works because Streamlit tabs execute sequentially in one run,
+    # and tab_live will always run (even if tab not selected).
+    st.session_state["_index_symbol_controls_rendered_this_run"] = False
+
+    idx_sym = _render_index_symbol_controls_once(config)
 
     constituents = _get_constituents_ui()
     if not constituents:
@@ -162,7 +212,7 @@ def tab_live(config):
     col1, col2 = st.columns([1, 1])
 
     with col1:
-        if st.button("Run live snapshot"):
+        if st.button("Run live snapshot", key="btn_run_live_snapshot"):
             try:
                 fit, table = run_live_snapshot(
                     client_id=config.client_id,
@@ -177,12 +227,16 @@ def tab_live(config):
                 st.metric("RMSE (BN pts)", f"{fit.rmse:.3f}" if fit.rmse == fit.rmse else "NA")
                 st.metric("Observations", f"{fit.n_obs}")
                 st.dataframe(table, use_container_width=True)
-                st.download_button("Download impacts CSV", table.to_csv(index=False), file_name=f"live_impacts_{today}.csv")
+                st.download_button(
+                    "Download impacts CSV",
+                    table.to_csv(index=False),
+                    file_name=f"live_impacts_{today}.csv",
+                )
             except Exception as e:
                 st.error(str(e))
 
     with col2:
-        if st.button("Check expiry detection (this week)"):
+        if st.button("Check expiry detection (this week)", key="btn_check_expiry_this_week"):
             try:
                 fyers = get_fyers_client(config.client_id, st.session_state["fyers_access_token"])
                 wk_start = today - timedelta(days=today.weekday())
@@ -205,7 +259,8 @@ def tab_backtest(config):
         st.warning("Login in the sidebar first.")
         return
 
-    idx_sym = _index_symbol_autodetect_ui(config)
+    # IMPORTANT: Do NOT render the index symbol widgets here.
+    idx_sym = _get_index_symbol_value(config)
 
     constituents = _get_constituents_ui()
     if not constituents:
@@ -223,7 +278,7 @@ def tab_backtest(config):
 
     st.caption("1-min intraday history is fetched in 100-day chunks and cached. FYERS history calls count toward rate limits.")
 
-    if st.button("Run backtest"):
+    if st.button("Run backtest", key="btn_run_backtest"):
         with st.spinner("Fetching data + running per-expiry fits..."):
             try:
                 res = run_backtest(
@@ -238,11 +293,19 @@ def tab_backtest(config):
                 )
                 st.success(f"Detected {len(res.detection.expiry_dates)} weekly expiries. Method: {res.detection.method}")
                 st.dataframe(res.expiry_metrics, use_container_width=True)
-                st.download_button("Download expiry metrics CSV", res.expiry_metrics.to_csv(index=False), file_name="expiry_metrics.csv")
+                st.download_button(
+                    "Download expiry metrics CSV",
+                    res.expiry_metrics.to_csv(index=False),
+                    file_name="expiry_metrics.csv",
+                )
 
                 st.subheader("Impacts (long format)")
                 st.dataframe(res.expiry_betas_long, use_container_width=True, height=420)
-                st.download_button("Download impacts CSV", res.expiry_betas_long.to_csv(index=False), file_name="expiry_impacts_long.csv")
+                st.download_button(
+                    "Download impacts CSV",
+                    res.expiry_betas_long.to_csv(index=False),
+                    file_name="expiry_impacts_long.csv",
+                )
 
                 if not res.expiry_betas_long.empty:
                     summary = (
@@ -253,6 +316,10 @@ def tab_backtest(config):
                     )
                     st.subheader("Impact summary (across expiries)")
                     st.dataframe(summary, use_container_width=True)
-                    st.download_button("Download summary CSV", summary.to_csv(index=False), file_name="impact_summary.csv")
+                    st.download_button(
+                        "Download summary CSV",
+                        summary.to_csv(index=False),
+                        file_name="impact_summary.csv",
+                    )
             except Exception as e:
                 st.error(str(e))
